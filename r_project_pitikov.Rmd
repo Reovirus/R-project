@@ -1,0 +1,303 @@
+---
+title: "R Notebook to project"
+output:
+  html_document:
+    df_print: paged
+---
+Итак, начну с загрузки пакетов. Их будет много.
+```{r}
+Packages <- c("tidyverse", "tseries", "caret", "ggpubr", "stats", "corrplot", "GGally", "rstatix", "colorspace", "sandwich", "lmtest")
+lapply(Packages, library, character.only = TRUE)
+```
+А теперь и сам датасет. Это отзывы на винишко со всего мира. Датасет включает в себя страну, регион (как сам регион, так и аппеласьон), собсвенно отзыв, оценку по 100-балльной шкале, цену в долларах, имя сомелье и его твиттер. Во всех столбцах, кроме отзыва и оценки есть пропуски
+```{r}
+wine <- read_csv('/Users/pitikov_egor/Desktop/winemag-data-130k-v2.csv')
+wine
+```
+Просто посмотреть зависимость всего от всего ничего не дало (исключены пункиы с огромным колечеством значений). Ну то есть дало понимание, что надо копать глубже...
+```{r}
+wine_sub <- subset(wine, select = -c(1, description, designation, province, region_1, region_2, title, variety, winery, taster_twitter_handle))
+```
+```{r}
+ggpairs(wine_sub, cardinality_threshold = 45, upper = list(continuous = wrap("cor", method = "spearman")))+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 4), axis.text.y = element_text(size = 4))
+```
+
+Для начала самое логичное - корреляция оценки и стоимости. Заметно, что данные скоррелированы, однако есть сильные выбросы. Да и стобалльное вино можно найти с 250 баксов, что не может не радовать. Однако линейную регрессию построить не получится - дисперсия на протяжении линии тренда различна. Возможно, это объясняется регионом производсва вина (брендовой накруткой стоимости)
+```{r}
+as <- ggplot(wine, aes(x=price, y=points)) + 
+  geom_point(aes(color = country)) + 
+  stat_smooth(method = lm, se = T) + 
+  ylim(75, 101) + 
+  xlim(0, 1000)
+ns <- ggplot(wine, aes(x=price, y=points)) + 
+  geom_point(aes(color = country)) + 
+  stat_smooth(method = lm, se = T) + 
+  ylim(75, 101) +
+  ggtitle("Plot of points by price")
+as
+ns
+```
+
+
+Для проверки корреляции стоимости и рейтинга был применен тест спирмана. 0,6 довольно неплохая корреляция, а p-value указывает на ее значимость. Что ж, видимо, за хорошее вино надо платить. 
+```{r}
+a <- cor.test(wine$points, wine$price, method = 'spearman')
+a
+```
+Были построены гистограммы и функции распредения для оценок и стоимости. обе нормальными можно назвать с натяжкой, а значит, в дальнейшем в приоритете ранговые методы
+```{r}
+g1 <- ggplot(wine, aes(price)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 position = 'identity') + 
+  geom_density(bw = 8, alpha = 8) +
+  xlim(0, 200) +
+  ggtitle("Histogramm of price")
+g2 <- ggplot(wine, aes(points)) +
+  geom_histogram(aes(y = after_stat(density), binwidth=0.5),
+                 position = 'identity') + 
+  geom_density(bw = 8, alpha = 8) +
+  xlim(70, 101) + 
+  scale_x_continuous(breaks = seq(70, 101, by = 5)) +
+  ggtitle("Histogramm of scores")
+
+#ggarrange(g1, g2 + rremove("x.text"), 
+ #         labels = c("A", "B"),
+  #        ncol = 2, nrow = 1, vjust = 10, align = "v", widths = 1, heights = c(4, 4))
+g1
+g2
+```
+Для проверки на нормальность был использован тест харки-бера. Даже он будет давать ошибки первого рода на таких данных, но чем богаты...
+Оба распредения значимо отличаются от нормального 
+```{r}
+x <- as.numeric(wine$points)
+x <- x[!is.na(x)]
+f <- jarque.bera.test(x)
+f
+
+y <- as.numeric(wine$price)
+y <- x[!is.na(y)]
+q <- jarque.bera.test(y)
+q
+```
+Для оценки различий по стране-проихводителю был построен боксплот и посчитан тест круская уоллиса. 
+Вина из разных стран значимо отличаются, в топе Чехия и Австрия.
+```{r}
+ggplot(wine, aes(y=points, fill=country)) + 
+  geom_boxplot()+
+  theme(axis.text.x=element_text(angle =- 90, vjust = 0.5))+
+  ggtitle("Boxplot scores to country")
+c <- wine %>% drop_na(country) %>% kruskal.test(points ~ country)
+c
+```
+Так-так. Вроде как Чехия и Австрия в лидерах не только по производству пива, но и вина тоже. Чтобы проверить значимость различий между станами использован тест Данна. И тут выяснилось, что отличия у Чехии не особо значимы... Да и вообще хорошо отличаются только лидеры от аутсайдеров... Что ж, +- все вино из примерно топ-10 стран-прозводителей получило статистически неразличимые отличия и, кажется, чешское вино не стоит таких денег, как на полках в SimpleWine. (Стало грустно за потраченное...)
+```{r}
+test_res <- wine %>% dunn_test(points ~ country, p.adjust.method = "holm") %>% select(group1, group2, p.adj)
+ggplot(test_res, aes(group1, group2)) + geom_tile(aes(fill = p.adj)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 6), axis.text.y = element_text(size = 6), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + ggtitle("Heatmap of Dunn pvals")
+
+```
+```{r}
+c <- wine %>% drop_na(country) %>% kruskal.test(points ~ country)
+c
+```
+
+Чтобы выяснить ценовые предпочтения сомелье был также построен боксплот и проведен тест круская уоллиса. Сомелье пьют вино их разных ценовых категорий с очень большой значимостью. Это плохо, так как будет вносить дополнительный биас.
+```{r}
+ggplot(wine, aes(y=price, x=taster_name, fill=taster_name)) + 
+  geom_boxplot()+
+  theme(axis.text.x=element_text(angle =- 90, vjust = 0.5))+
+  ylim(0, 250)+
+  ggtitle("Boxplot price to taster_name")
+```
+Чтобы проверить, кто именно из критиков от кого отличается использован тест Данна - он сохраняет ранжирование и использует дисперсионную оценку, полученную в тесте Краскелла Уолиса. Оп-ля. Оказывается, есть группы критиков, пьющие винишко из схожих ценовых категорий. Это хорошо, можно читать их отзывы и выбирать что-то прекрасно-фруктовое, приятно-танниновое, отметая откровенно плозие варианты. Или нет?
+```{r}
+test_res <- wine %>% dunn_test(price ~ taster_name, p.adjust.method = "holm") %>% select(group1, group2, p.adj)
+ggplot(test_res, aes(group1, group2)) + geom_tile(aes(fill = p.adj)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + ggtitle("Heatmap of Dunn pvals price of tasters")
+```
+
+```{r}
+c <- wine %>% drop_na(taster_name, price) %>% kruskal.test(price ~ taster_name)
+c
+```
+Так. Есть понимание, что медианы различны. НО может между сомелье они похожи? Тест Данна может показать, где именно наблюдается различие
+
+Следующим шагом стало создание боксплота оценок в зависимости от сомелье и проверка его тем же тестом круская. Оченки у критиков также разнятся, что вносит еще один биас. 
+```{r}
+ggplot(wine, aes(y=points, x=taster_name, fill=taster_name)) + 
+  geom_boxplot()+
+  theme(axis.text.x=element_text(angle =- 90, vjust = 0.5))+
+  ylim(70, 101)+
+  ggtitle("Boxplot score to taster_name")
+c <- wine %>% drop_na(country) %>% kruskal.test(points ~ taster_name)
+c
+```
+ТАК. А может, все-таки есть просто группы критиков с похожей медианой  оценки? Снова Данн и хитмап похож на хитмап по ценам! Да, все-таки у похожих ценовых диапазонов схожие оценки, за несколькими исключениями (Поль Грегут, например, перестает коррелировать с Кэрри  Дайксом, хоть Дайкс и не теряет всех коррелций). Интересно... Однако в большинсве своем сомелье не нашли согласия - кажеся, цена роляет.
+```{r}
+test_res <- wine %>% dunn_test(points ~ taster_name, p.adjust.method = "holm") %>% select(group1, group2, p.adj)
+ggplot(test_res, aes(group1, group2)) + geom_tile(aes(fill = p.adj)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + ggtitle("Heatmap of Dunn pvals points of tasters")
+```
+Чтобы проверить, насколько сомелье привязаны к какой-либо стране, был проведен точный тест фишера. И да, величины страна-критик зависимы. А это еще один неучтенный биас...
+```{r}
+wine %>% drop_na(taster_name, country) %>% group_by(taster_name, country) %>%summarise(count = n())
+wine_grouped <- wine %>% drop_na(taster_name, country) %>% group_by(taster_name, country) %>%summarise(count = n())%>% pivot_wider(names_from = taster_name, values_from = count)
+wine_grouped[is.na(wine_grouped)] <- 0
+f.res <- fisher.test(wine_grouped[2:20], simulate.p.value = TRUE, B = 10000)
+f.res
+```
+Далее было посчитано число слов в каждом отзыве
+```{r}
+wine$total <- sapply(wine$description, function(x) length(unlist(strsplit(as.character(x), "\\W+"))))
+wine
+```
+На скаттерплоте отобрадена зависимость числа слов от оценки. Про любимое вино больше пишут - логично. А тест Спирмана нашел неплохую корреляцию между размером отзыва и оценкой. 
+```{r}
+as <- ggplot(wine, aes(x=total, y=points)) + 
+  geom_point(aes(color = taster_name)) + 
+  stat_smooth(method = lm, se = T) + ggtitle("Plot of points by total words")
+as
+```
+```{r}
+a <- cor.test(wine$points, wine$total, method = 'spearman')
+a
+```
+```{r}
+test_res <- wine %>% dunn_test(total ~ taster_name, p.adjust.method = "holm") %>% select(group1, group2, p.adj)
+ggplot(test_res, aes(group1, group2)) + geom_tile(aes(fill = p.adj)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 6), axis.text.y = element_text(size = 6), panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + ggtitle("Heatmap of Dunn pvals of total between somelje")
+```
+
+Далее было проверено, не отличаются ли по длине отзывы у разных сомелье. Отличаются, о чем говорит p-value теста Круская-Уоллиса
+```{r}
+ggplot(wine, aes(y=total, x=taster_name, fill=taster_name)) + 
+  geom_boxplot()+
+  theme(axis.text.x=element_text(angle =- 90, vjust = 0.5))+
+  ylim(0, 250)
+```
+```{r}
+c <- wine %>% drop_na(taster_name) %>% kruskal.test(total ~ taster_name)
+c
+```
+```{r}
+g1 <- ggplot(wine, aes(total)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 position = 'identity') + 
+  geom_density(bw = 8, alpha = 8) +
+  xlim(0, 200) +
+  ggtitle("Histogramm of price")
+g1
+x <- as.numeric(wine$total)
+x <- x[!is.na(x)]
+f <- jarque.bera.test(x)
+f
+```
+Была построена линейная регрессия оценки вина от числа слов в отзыве с учетом сомелье.Ибо распреления все-таки близки к нормальным, НО из-зи большого числа наблюдений чувствительность тестов многократно вохрастает. И она очень хорошо объясняет наблюдаемые зависимости. Кажется, что число слов в отзыве вообще один из самых лучших показателей хорошего вина - выбросы реже, чем по стоимости, стабильнее и так далее... На qq плоте звметно, что распредение остатков близко к нормальному. Из неприятного данные не совсем гомоскедаксичны, то есть доверительные интервалы для прогнозов надо считать довольно сложным образом мммм... тест Уайта или Голдфельда для ошибок. (Если присутсвует условная гетероскедаксичность, то есть и безусловная гомоскедаксичность - модель сохраняет силу! Объясняется это тем, что все пишут число слов близкое к среднему. И все-таки довольно редко (относительно) появляются отзывы в пару предоложений или "война и мир" на 100500 страниц (но читать интересно - я про отзывы на винишко). Ну, или можно немного поправить. Постараться.
+
+Собственно, значимость коэффицентов приведена ниже. Нетрудно заметить, что это хороший предиктор не для всех сомелье, но для многих
+```{r}
+total_to_points <- lm(points ~ total*taster_name, wine)
+summary(total_to_points)
+plot(total_to_points, las = 1)
+coeftest(total_to_points, vcov = vcovHC(total_to_points, type = 'HC3'))
+```
+Модель, учитывающая цену построилась ужасно - логично, распредение цены сильно отличается от нормального
+```{r}
+total_to_points <- lm(points ~ (total + price)*taster_name, wine)
+summary(total_to_points)
+plot(total_to_points, las = 1)
+coeftest(total_to_points, vcov = vcovHC(total_to_points, type = 'HC3'))
+```
+После этого я решил пропробовать что-то сказать про текст отзыва, для чего импортируется еще куча библиотек
+```{r}
+libs <- c('tidytext', 'stringr', 'tidyr', 'wordcloud', 'reshape2', 'hunspell','SnowballC', 'xtable', 'knitr', 'kableExtra')
+lapply(libs, library, character.only = TRUE)
+```
+Первым делом, считается количество вхождений слова в каждый отзыв
+```{r}
+superwine <- wine %>%
+  filter(str_detect(description, "^[^>]+[A-Za-z\\d]") | description !="") 
+superwine <- tibble(id_review = as.numeric(superwine$...1) , text_review = superwine$description, is_good = superwine$description >= 92)
+superwine <- superwine %>%  unnest_tokens(word, text_review) %>% na.omit()
+superwine
+```
+Далее была построена гистограмма для топа слов по всем отзывам. Ожидаемо, чаще всего встречаются союзы, предлоги, артикли и прочие служебные части речи. Их осмысленного, понятное дело часто встречается слово wine и характеристики вина - таннинность, кислотность, общее впечатление.
+```{r}
+superwine %>% 
+  count(word, sort = TRUE) %>% 
+  filter(n > 20000) %>% 
+  mutate(word = reorder(word, n)) %>% 
+  ggplot(aes(word, n)) + 
+  geom_col() + 
+  xlab(NULL) + 
+  coord_flip() +
+  ggtitle("Plot top words count")
+
+```
+Далее все вино было поделено на 2 категории - с оценкой ниже и выше 92. Собственно, хорошим я буду называть вино, оцененнок выше 92 баллов. Оценка взята не с потолка и даже не p-value, а банально из личного опыта. Были построены гистограммы для наиболее частых слов в хорошем и плохом вине. Там много пересечений, большая часть снова служебные части речи и очень хорошо заметно, что отзывы о хорошем вине длиннее. При этом в более низкорейтиговом вине чаще появляются характеристики и описания, а высокорейтинговое оценивают ощущениями
+```{r}
+superwine_counts <- superwine %>% group_by( word, is_good) %>%summarise (count = n())
+superwine_counts %>% 
+  group_by(is_good) %>% 
+  top_n(25, count) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, count)) %>%
+  ggplot(aes(y = word, x = count, fill = is_good)) + 
+  geom_col(show.legend = FALSE) + 
+  facet_wrap(~is_good, scales = "free_y") + 
+  labs(y = "Contribution to Sentiment", x = NULL) +
+  ggtitle("Plot top words into categories")
+
+```
+Было построено сравнительное облако слов о хорошем и плохом вине. Чем больше на нем слово, тем чаще оно появляется в соответсвующих отзывах
+```{r}
+superwine %>% 
+  count(word, is_good, sort = TRUE) %>% 
+  acast(word ~ is_good, value.var = "n", fill = 0) %>% 
+  comparison.cloud(colors = c("gray20", "gray80"), max.words = 100)
+```
+Далее было отобрано 100 самых часто встречающися слов по категориям хорошего и плохого вина и для этих слов сделан тест фишера (проверялась зависимость переменных наличие слова и статус отзыва - хороший или не очень)
+```{r}
+most_freq <- superwine_counts %>% 
+  group_by(is_good) %>% 
+  top_n(100, count) %>%
+  ungroup()
+most_freq <- most_freq %>% distinct(word)
+pval_freqs <- c()
+for (pattern in most_freq$word){
+  my_mat <- c(filter(superwine_counts, word==pattern & is_good == T)[1, 'count'],
+    filter(superwine_counts, word==pattern & is_good == F)[1, 'count'],
+    sum(filter(superwine_counts, word!=pattern & is_good == T)[, 'count']),
+    sum(filter(superwine_counts, word!=pattern & is_good == F)[, 'count']))
+  my_mat <- unlist(my_mat, use.names=FALSE)
+  my_mat <- matrix(my_mat,nrow=2,ncol=2,byrow=TRUE)
+  my_mat[is.na(my_mat)] = 0
+  cur_pva <- fisher.test(my_mat, simulate.p.value = T, B = 10000)$p.value
+  pval_freqs <- append(pval_freqs, cur_pva)
+}
+```
+Был построен график -log2 p-value (поправленных Холмом). На нем можно увидеть, ккие слова ассоциированы с какой категорией отзывов. В среднем, плохие отзывы более числовые и включают слова-описания вкуса вина, хорошие же об эмоциях и красном вишневом вине.А столбики 2 цветов - это, скорее всего, артефакт, вызванный ну очень уж разными размерами отзывов.
+
+```{r}
+pval_freqs <- p.adjust(pval_freqs, method = "holm")
+pval_table <- data.frame(word = most_freq$word, b = -1*log(pval_freqs, base = 2))
+pval_table <- as_tibble(pval_table)
+```
+```{r}
+most_freq <- superwine_counts %>% 
+  group_by(is_good) %>% 
+  top_n(100, count) %>%
+  ungroup()
+pval_table = left_join(pval_table, most_freq, by = c("word" = "word"))
+```
+```{r}
+pval_table %>%
+  top_n(50, b) %>%
+  ggplot(aes(y = word, x = b, fill = is_good)) + 
+  geom_col(show.legend = T) + 
+  labs(y = "", x = NULL) +
+  ggtitle("-log2 pvalues") +
+  ggtitle("Plot of top words pvalues")
+```
+ 
+Та часть, которая не получилась - здесь должна была быть модель предсказатель рейтинга по отзыву на основе реккурентных слоев, но моего компа не хватило даже на токенизацию небольшой подвыборки.
+Если бы был питон/видеокарта/нормальные мозги запилил бы реккурентную нейронку с кучей параметров (нет. или да. надо будет попробовать на досуге).
+
+Ну вот как-то так. А я пошел проверять на практике предположение о том, что большие отзывы связаны с хорошим вином. И что хорошее вино стоит дорого (плакала моя зарплата(((((. И вам желаю того же - чем больше данных, тем точнее статистика.
